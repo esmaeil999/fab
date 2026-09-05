@@ -36,12 +36,35 @@ jobs:
 
       - run: pip install -r scripts/requirements.txt
 
+      # Git tags cannot contain whitespace or most punctuation. Inputs typed by hand
+      # often carry a trailing space (e.g. "nzdusd "), which previously produced an
+      # invalid tag and left the release stuck as a draft.
+      - name: Normalize inputs
+        id: norm
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          RAW_SYMBOL: ${{ inputs.symbol }}
+          RAW_START: ${{ inputs.start }}
+          RAW_END: ${{ inputs.end }}
+        run: |
+          SYMBOL=$(printf '%s' "$RAW_SYMBOL" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]' | tr -cd 'A-Z0-9._-')
+          START=$(printf '%s' "$RAW_START" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+          END=$(printf '%s' "$RAW_END" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+          if [ -z "$SYMBOL" ]; then
+            echo "::error::Symbol is empty after normalization"
+            exit 1
+          fi
+          echo "symbol=$SYMBOL" >> "$GITHUB_OUTPUT"
+          echo "start=$START" >> "$GITHUB_OUTPUT"
+          echo "end=$END" >> "$GITHUB_OUTPUT"
+          echo "Symbol: '$SYMBOL'  Start: '$START'  End: '$END'"
+
       - name: Download (manual run)
         if: github.event_name == 'workflow_dispatch'
         run: |
           mkdir -p data
-          python scripts/dukascopy_ticks.py "${{ inputs.symbol }}" "${{ inputs.start }}" "${{ inputs.end }}" \
-            -o "data/${{ inputs.symbol }}.csv"
+          python scripts/dukascopy_ticks.py "${{ steps.norm.outputs.symbol }}" "${{ steps.norm.outputs.start }}" "${{ steps.norm.outputs.end }}" \
+            -o "data/${{ steps.norm.outputs.symbol }}.csv"
 
       - name: Download (scheduled, previous day)
         if: github.event_name == 'schedule'
@@ -57,20 +80,30 @@ jobs:
         id: pack
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            START=$(echo "${{ inputs.start }}" | cut -d' ' -f1)
-            END=$(echo "${{ inputs.end }}" | cut -d' ' -f1)
-            TAG="ticks-${{ inputs.symbol }}-${START}_${END}"
-            TITLE="${{ inputs.symbol }} ticks ${START} to ${END}"
+            SYMBOL="${{ steps.norm.outputs.symbol }}"
+            START=$(echo "${{ steps.norm.outputs.start }}" | cut -d' ' -f1)
+            END=$(echo "${{ steps.norm.outputs.end }}" | cut -d' ' -f1)
+            TAG="ticks-${SYMBOL}-${START}_${END}"
+            TITLE="${SYMBOL} ticks ${START} to ${END}"
           else
             DAY=$(date -u -d "yesterday" +%F)
             TAG="ticks-daily-${DAY}"
             TITLE="Daily ticks ${DAY} (${SCHEDULED_SYMBOLS})"
           fi
+
+          # Final safety net: strip anything git does not allow in a tag name
+          TAG=$(printf '%s' "$TAG" | tr -cd 'A-Za-z0-9._-')
+          if ! git check-ref-format "refs/tags/$TAG"; then
+            echo "::error::Generated tag '$TAG' is not a valid git tag"
+            exit 1
+          fi
+
           ZIP="${TAG}.zip"
           zip -j -9 "$ZIP" data/*.csv
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "title=$TITLE" >> "$GITHUB_OUTPUT"
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "Tag: $TAG"
           ls -lh "$ZIP"
 
       - name: Publish GitHub Release
