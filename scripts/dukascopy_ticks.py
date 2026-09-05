@@ -3,6 +3,12 @@ Download historical tick data from Dukascopy and save it as CSV.
 
 Usage:
     python dukascopy_ticks.py EURUSD 2024-01-02 2024-01-05 -o eurusd_ticks.csv
+    python dukascopy_ticks.py EURUSD 2024-01-02 2024-01-05 --format mt5 -o EURUSD_ticks.csv
+
+Output formats:
+    mt5 (default) - MetaTrader 5 tick import format (Symbols -> Ticks -> Import):
+                    <DATE>\t<TIME>\t<BID>\t<ASK>\t<LAST>\t<VOLUME>\t<FLAGS>
+    raw           - Plain CSV with UTC timestamp, ask, bid, ask_volume, bid_volume
 
 Requirements:
     pip install requests pandas
@@ -38,6 +44,10 @@ PRICE_DIVISORS = {
     "BRENTCMDUSD": 1_000, "LIGHTCMDUSD": 1_000,
 }
 DEFAULT_DIVISOR = 100_000  # 5-decimal FX pairs (EURUSD, GBPUSD, ...)
+
+# MetaTrader 5 tick flags (ENUM_TICK_FLAGS)
+TICK_FLAG_BID = 2
+TICK_FLAG_ASK = 4
 
 
 def build_url(symbol: str, dt: datetime) -> str:
@@ -119,6 +129,53 @@ def download(symbol: str, start: datetime, end: datetime, delay: float = 0.2) ->
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
+def price_digits(symbol: str) -> int:
+    divisor = PRICE_DIVISORS.get(symbol.upper(), DEFAULT_DIVISOR)
+    return len(str(divisor)) - 1
+
+
+def to_mt5(df: pd.DataFrame, symbol: str, tz_shift_hours: int = 0) -> pd.DataFrame:
+    """
+    Convert raw ticks into the MetaTrader 5 tick import layout.
+
+    MT5 expects a tab-separated file with the header
+        <DATE> <TIME> <BID> <ASK> <LAST> <VOLUME> <FLAGS>
+    where DATE is YYYY.MM.DD and TIME is HH:MM:SS.mmm.
+    FLAGS tells MT5 which fields changed in each tick (2 = bid, 4 = ask).
+    """
+    if df.empty:
+        return pd.DataFrame(columns=["<DATE>", "<TIME>", "<BID>", "<ASK>", "<LAST>", "<VOLUME>", "<FLAGS>"])
+
+    ts = df["timestamp"]
+    if tz_shift_hours:
+        ts = ts + pd.Timedelta(hours=tz_shift_hours)
+    ts = ts.dt.tz_localize(None)
+
+    digits = price_digits(symbol)
+    bid = df["bid"].round(digits)
+    ask = df["ask"].round(digits)
+
+    bid_changed = bid.ne(bid.shift())
+    ask_changed = ask.ne(ask.shift())
+    flags = bid_changed.astype(int) * TICK_FLAG_BID + ask_changed.astype(int) * TICK_FLAG_ASK
+    # The very first tick has no predecessor: mark both prices as fresh
+    flags.iloc[0] = TICK_FLAG_BID | TICK_FLAG_ASK
+    flags = flags.replace(0, TICK_FLAG_BID | TICK_FLAG_ASK)
+
+    fmt = f"{{:.{digits}f}}".format
+    return pd.DataFrame(
+        {
+            "<DATE>": ts.dt.strftime("%Y.%m.%d"),
+            "<TIME>": ts.dt.strftime("%H:%M:%S.%f").str[:-3],
+            "<BID>": bid.map(fmt),
+            "<ASK>": ask.map(fmt),
+            "<LAST>": "0",
+            "<VOLUME>": "0",
+            "<FLAGS>": flags.astype(int),
+        }
+    )
+
+
 def parse_date(value: str) -> datetime:
     for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
         try:
@@ -135,6 +192,14 @@ def main() -> None:
     parser.add_argument("end", type=parse_date, help="End date (UTC, exclusive), e.g. 2024-01-05")
     parser.add_argument("-o", "--output", type=Path, help="Output CSV path (default: <SYMBOL>_<start>_<end>.csv)")
     parser.add_argument("--delay", type=float, default=0.2, help="Seconds to wait between requests")
+    parser.add_argument(
+        "--format", choices=("mt5", "raw"), default="mt5",
+        help="Output layout: 'mt5' for MetaTrader 5 tick import (default), 'raw' for plain UTC CSV",
+    )
+    parser.add_argument(
+        "--tz-shift", type=int, default=0,
+        help="Hours to add to UTC timestamps so they match your broker's server time (mt5 format only), e.g. 2 or 3",
+    )
     args = parser.parse_args()
 
     if args.end <= args.start:
@@ -143,8 +208,14 @@ def main() -> None:
     df = download(args.symbol, args.start, args.end, args.delay)
 
     output = args.output or Path(f"{args.symbol.upper()}_{args.start:%Y%m%d}_{args.end:%Y%m%d}.csv")
-    df.to_csv(output, index=False)
-    print(f"\nSaved {len(df):,} ticks to {output}")
+
+    if args.format == "mt5":
+        mt5_df = to_mt5(df, args.symbol, args.tz_shift)
+        mt5_df.to_csv(output, index=False, sep="\t", lineterminator="\n")
+    else:
+        df.to_csv(output, index=False)
+
+    print(f"\nSaved {len(df):,} ticks to {output} ({args.format} format)")
 
 
 if __name__ == "__main__":
