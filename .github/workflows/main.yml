@@ -13,6 +13,18 @@ on:
       end:
         description: "End date/time UTC (exclusive)"
         required: true
+      format:
+        description: "Output format"
+        required: true
+        type: choice
+        default: "mt5"
+        options:
+          - mt5
+          - raw
+      tz_shift:
+        description: "Hours to add to UTC so timestamps match your broker server time (mt5 only, e.g. 2 or 3)"
+        required: false
+        default: "0"
   schedule:
     # Every day at 02:00 UTC — downloads the previous day for symbols listed in SCHEDULED_SYMBOLS
     - cron: "0 2 * * *"
@@ -64,6 +76,7 @@ jobs:
         run: |
           mkdir -p data
           python scripts/dukascopy_ticks.py "${{ steps.norm.outputs.symbol }}" "${{ steps.norm.outputs.start }}" "${{ steps.norm.outputs.end }}" \
+            --format "${{ inputs.format }}" --tz-shift "${{ inputs.tz_shift || '0' }}" \
             -o "data/${{ steps.norm.outputs.symbol }}.csv"
 
       - name: Download (scheduled, previous day)
@@ -73,7 +86,7 @@ jobs:
           START=$(date -u -d "yesterday" +%F)
           END=$(date -u +%F)
           for SYMBOL in $SCHEDULED_SYMBOLS; do
-            python scripts/dukascopy_ticks.py "$SYMBOL" "$START" "$END" -o "data/${SYMBOL}_${START}.csv"
+            python scripts/dukascopy_ticks.py "$SYMBOL" "$START" "$END" --format mt5 -o "data/${SYMBOL}_${START}.csv"
           done
 
       - name: Build release name and zip CSVs
