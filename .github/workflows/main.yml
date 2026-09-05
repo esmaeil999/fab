@@ -51,8 +51,35 @@ jobs:
             python scripts/dukascopy_ticks.py "$SYMBOL" "$START" "$END" -o "data/${SYMBOL}_${START}.csv"
           done
 
-      - uses: actions/upload-artifact@v4
+      - name: Build release name and zip CSVs
+        id: pack
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            START=$(echo "${{ inputs.start }}" | cut -d' ' -f1)
+            END=$(echo "${{ inputs.end }}" | cut -d' ' -f1)
+            TAG="ticks-${{ inputs.symbol }}-${START}_${END}"
+            TITLE="${{ inputs.symbol }} ticks ${START} to ${END}"
+          else
+            DAY=$(date -u -d "yesterday" +%F)
+            TAG="ticks-daily-${DAY}"
+            TITLE="Daily ticks ${DAY} (${SCHEDULED_SYMBOLS})"
+          fi
+          ZIP="${TAG}.zip"
+          zip -j -9 "$ZIP" data/*.csv
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          ls -lh "$ZIP"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: dukascopy-ticks-${{ github.run_id }}
-          path: data/*.csv
-          retention-days: 30
+          tag_name: ${{ steps.pack.outputs.tag }}
+          name: ${{ steps.pack.outputs.title }}
+          files: ${{ steps.pack.outputs.zip }}
+          body: |
+            Dukascopy tick data exported by GitHub Actions.
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
